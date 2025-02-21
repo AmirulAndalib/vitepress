@@ -1,4 +1,4 @@
-import path from 'path'
+import path from 'node:path'
 import c from 'picocolors'
 import {
   mergeConfig,
@@ -16,7 +16,7 @@ import {
   resolveAliases
 } from './alias'
 import { resolvePages, resolveUserConfig, type SiteConfig } from './config'
-import { mathjaxElements } from './markdown/math'
+import { disposeMdItInstance } from './markdown/markdown'
 import {
   clearCache,
   createMarkdownToVueRenderFn,
@@ -38,8 +38,7 @@ declare module 'vite' {
 
 const themeRE = /\/\.vitepress\/theme\/index\.(m|c)?(j|t)s$/
 const hashRE = /\.([-\w]+)\.js$/
-const staticInjectMarkerRE =
-  /\b(const _hoisted_\d+ = \/\*(?:#|@)__PURE__\*\/\s*createStaticVNode)\("(.*)", (\d+)\)/g
+const staticInjectMarkerRE = /\bcreateStaticVNode\((?:(".*")|('.*')), (\d+)\)/g
 const staticStripRE = /['"`]__VP_STATIC_START__[^]*?__VP_STATIC_END__['"`]/g
 const staticRestoreRE = /__VP_STATIC_(START|END)__/g
 
@@ -76,7 +75,6 @@ export async function createVitePressPlugin(
     site,
     vue: userVuePluginOptions,
     vite: userViteConfig,
-    pages,
     lastUpdated,
     cleanUrls
   } = siteConfig
@@ -88,7 +86,7 @@ export async function createVitePressPlugin(
 
   if (markdown?.math) {
     isCustomElement = (tag) => {
-      if (mathjaxElements.includes(tag)) {
+      if (tag.startsWith('mjx-')) {
         return true
       }
       return userCustomElementChecker?.(tag) ?? false
@@ -132,8 +130,7 @@ export async function createVitePressPlugin(
       markdownToVue = await createMarkdownToVueRenderFn(
         srcDir,
         markdown,
-        pages,
-        config.define,
+        siteConfig.pages,
         config.command === 'build',
         config.base,
         lastUpdated,
@@ -153,11 +150,16 @@ export async function createVitePressPlugin(
             site.themeConfig?.search?.provider === 'algolia' ||
             !!site.themeConfig?.algolia, // legacy
           __CARBON__: !!site.themeConfig?.carbonAds,
-          __ASSETS_DIR__: JSON.stringify(siteConfig.assetsDir)
+          __ASSETS_DIR__: JSON.stringify(siteConfig.assetsDir),
+          __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: !!process.env.DEBUG
         },
         optimizeDeps: {
           // force include vue to avoid duplicated copies when linked + optimized
-          include: ['vue', 'vitepress > @vue/devtools-api'],
+          include: [
+            'vue',
+            'vitepress > @vue/devtools-api',
+            'vitepress > @vueuse/core'
+          ],
           exclude: ['@docsearch/js', 'vitepress']
         },
         server: {
@@ -268,7 +270,11 @@ export async function createVitePressPlugin(
         if (file.endsWith('.md')) {
           Object.assign(
             siteConfig,
-            await resolvePages(siteConfig.srcDir, siteConfig.userConfig)
+            await resolvePages(
+              siteConfig.srcDir,
+              siteConfig.userConfig,
+              siteConfig.logger
+            )
           )
         }
 
@@ -317,10 +323,11 @@ export async function createVitePressPlugin(
         // Using a regexp relies on specific output from Vue compiler core,
         // which is a reasonable trade-off considering the massive perf win over
         // a full AST parse.
-        code = code.replace(
-          staticInjectMarkerRE,
-          '$1("__VP_STATIC_START__$2__VP_STATIC_END__", $3)'
-        )
+        code = code.replace(staticInjectMarkerRE, (_, str1, str2, flag) => {
+          const str = str1 || str2
+          const quote = str[0]
+          return `createStaticVNode(${quote}__VP_STATIC_START__${str.slice(1, -1)}__VP_STATIC_END__${quote}, ${flag})`
+        })
         return code
       }
       return null
@@ -328,14 +335,11 @@ export async function createVitePressPlugin(
 
     generateBundle(_options, bundle) {
       if (ssr) {
-        // @ts-ignore will be removed in vite 5
-        if (config.ssr?.format !== 'cjs') {
-          this.emitFile({
-            type: 'asset',
-            fileName: 'package.json',
-            source: '{ "private": true, "type": "module" }'
-          })
-        }
+        this.emitFile({
+          type: 'asset',
+          fileName: 'package.json',
+          source: '{ "private": true, "type": "module" }'
+        })
       } else {
         // client build:
         // for each .md entry chunk, adjust its name to its correct path.
@@ -350,6 +354,10 @@ export async function createVitePressPlugin(
             bundle[name + '-lean'] = {
               ...chunk,
               fileName: chunk.fileName.replace(/\.js$/, '.lean.js'),
+              preliminaryFileName: chunk.preliminaryFileName.replace(
+                /\.js$/,
+                '.lean.js'
+              ),
               code: chunk.code.replace(staticStripRE, `""`)
             }
 
@@ -376,9 +384,11 @@ export async function createVitePressPlugin(
         try {
           await resolveUserConfig(siteConfig.root, 'serve', 'development')
         } catch (err: any) {
+          siteConfig.logger.error(err)
           return
         }
 
+        disposeMdItInstance()
         clearCache()
         await recreateServer?.()
         return
@@ -393,8 +403,9 @@ export async function createVitePressPlugin(
           config.publicDir
         )
 
+        const relativePath = slash(path.relative(srcDir, file))
         const payload: PageDataPayload = {
-          path: `/${slash(path.relative(srcDir, file))}`,
+          path: `/${siteConfig.rewrites.map[relativePath] || relativePath}`,
           pageData
         }
 
@@ -419,7 +430,7 @@ export async function createVitePressPlugin(
         return [
           ...modules,
           ...importers.map((id) => {
-            clearCache(id)
+            clearCache(slash(path.relative(srcDir, id)))
             return server.moduleGraph.getModuleById(id)
           })
         ].filter(Boolean) as ModuleNode[]

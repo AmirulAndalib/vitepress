@@ -69,10 +69,15 @@ export interface UserConfig<ThemeConfig = any>
 
   locales?: LocaleConfig<ThemeConfig>
 
+  router?: {
+    prefetchLinks?: boolean
+  }
+
   appearance?:
     | boolean
     | 'dark'
     | 'force-dark'
+    | 'force-auto'
     | (Omit<UseDarkOptions, 'initialValue'> & { initialValue?: 'dark' })
   lastUpdated?: boolean
   contentProps?: Record<string, any>
@@ -144,11 +149,20 @@ export interface UserConfig<ThemeConfig = any>
   useWebFonts?: boolean
 
   /**
+   * This option allows you to configure the concurrency of the build.
+   * A lower number will reduce the memory usage but will increase the build time.
+   *
+   * @experimental
+   * @default 64
+   */
+  buildConcurrency?: number
+
+  /**
    * @experimental
    *
    * source -> destination
    */
-  rewrites?: Record<string, string>
+  rewrites?: Record<string, string> | ((id: string) => string)
 
   /**
    * @experimental
@@ -201,6 +215,7 @@ export interface SiteConfig<ThemeConfig = any>
     | 'vue'
     | 'vite'
     | 'shouldPreload'
+    | 'router'
     | 'mpa'
     | 'metaChunk'
     | 'lastUpdated'
@@ -235,4 +250,5 @@ export interface SiteConfig<ThemeConfig = any>
   }
   logger: Logger
   userConfig: UserConfig
+  buildConcurrency: number
 }
