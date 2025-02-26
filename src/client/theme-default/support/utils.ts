@@ -1,6 +1,6 @@
 import { withBase } from 'vitepress'
+import { isExternal, treatAsHtml } from '../../shared'
 import { useData } from '../composables/data'
-import { isExternal } from '../../shared'
 
 export function throttleAndDebounce(fn: () => void, delay: number): () => void {
   let timeoutId: NodeJS.Timeout
@@ -17,14 +17,21 @@ export function throttleAndDebounce(fn: () => void, delay: number): () => void {
 }
 
 export function ensureStartingSlash(path: string): string {
-  return /^\//.test(path) ? path : `/${path}`
+  return path.startsWith('/') ? path : `/${path}`
 }
 
 export function normalizeLink(url: string): string {
-  if (isExternal(url)) return url
+  const { pathname, search, hash, protocol } = new URL(url, 'http://a.com')
+
+  if (
+    isExternal(url) ||
+    url.startsWith('#') ||
+    !protocol.startsWith('http') ||
+    !treatAsHtml(pathname)
+  )
+    return url
 
   const { site } = useData()
-  const { pathname, search, hash } = new URL(url, 'http://a.com')
 
   const normalizedPath =
     pathname.endsWith('/') || pathname.endsWith('.html')

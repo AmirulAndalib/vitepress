@@ -1,6 +1,6 @@
 import _debug from 'debug'
 import fs from 'fs-extra'
-import path from 'path'
+import path from 'node:path'
 import c from 'picocolors'
 import {
   createLogger,
@@ -10,13 +10,9 @@ import {
   type ConfigEnv
 } from 'vite'
 import { DEFAULT_THEME_PATH } from './alias'
+import type { DefaultTheme } from './defaultTheme'
 import { resolvePages } from './plugins/dynamicRoutesPlugin'
-import {
-  APPEARANCE_KEY,
-  type DefaultTheme,
-  type HeadConfig,
-  type SiteData
-} from './shared'
+import { APPEARANCE_KEY, slash, type HeadConfig, type SiteData } from './shared'
 import type { RawConfigExports, SiteConfig, UserConfig } from './siteConfig'
 
 export { resolvePages } from './plugins/dynamicRoutesPlugin'
@@ -74,7 +70,7 @@ export async function resolveConfig(
   const site = await resolveSiteData(root, userConfig)
   const srcDir = normalizePath(path.resolve(root, userConfig.srcDir || '.'))
   const assetsDir = userConfig.assetsDir
-    ? userConfig.assetsDir.replace(/\//g, '')
+    ? slash(userConfig.assetsDir).replace(/^\.?\/|\/$/g, '')
     : 'assets'
   const outDir = userConfig.outDir
     ? normalizePath(path.resolve(root, userConfig.outDir))
@@ -83,16 +79,23 @@ export async function resolveConfig(
     ? normalizePath(path.resolve(root, userConfig.cacheDir))
     : resolve(root, 'cache')
 
+  const resolvedAssetsDir = normalizePath(path.resolve(outDir, assetsDir))
+  if (!resolvedAssetsDir.startsWith(outDir)) {
+    throw new Error(
+      [
+        `assetsDir cannot be set to a location outside of the outDir.`,
+        `outDir: ${outDir}`,
+        `assetsDir: ${assetsDir}`,
+        `resolved: ${resolvedAssetsDir}`
+      ].join('\n  ')
+    )
+  }
+
   // resolve theme path
   const userThemeDir = resolve(root, 'theme')
   const themeDir = (await fs.pathExists(userThemeDir))
     ? userThemeDir
     : DEFAULT_THEME_PATH
-
-  const { pages, dynamicRoutes, rewrites } = await resolvePages(
-    srcDir,
-    userConfig
-  )
 
   const config: SiteConfig = {
     root,
@@ -100,8 +103,6 @@ export async function resolveConfig(
     assetsDir,
     site,
     themeDir,
-    pages,
-    dynamicRoutes,
     configPath,
     configDeps,
     outDir,
@@ -126,9 +127,10 @@ export async function resolveConfig(
     transformHead: userConfig.transformHead,
     transformHtml: userConfig.transformHtml,
     transformPageData: userConfig.transformPageData,
-    rewrites,
     userConfig,
-    sitemap: userConfig.sitemap
+    sitemap: userConfig.sitemap,
+    buildConcurrency: userConfig.buildConcurrency ?? 64,
+    ...(await resolvePages(srcDir, userConfig, logger))
   }
 
   // to be shared with content loaders
@@ -186,7 +188,7 @@ async function resolveConfigExtends(
   return resolved
 }
 
-function mergeConfig(a: UserConfig, b: UserConfig, isRoot = true) {
+export function mergeConfig(a: UserConfig, b: UserConfig, isRoot = true) {
   const merged: Record<string, any> = { ...a }
   for (const key in b) {
     const value = b[key as keyof UserConfig]
@@ -231,10 +233,13 @@ export async function resolveSiteData(
     description: userConfig.description || 'A VitePress site',
     base: userConfig.base ? userConfig.base.replace(/([^/])$/, '$1/') : '/',
     head: resolveSiteDataHead(userConfig),
+    router: {
+      prefetchLinks: userConfig.router?.prefetchLinks ?? true
+    },
     appearance: userConfig.appearance ?? true,
     themeConfig: userConfig.themeConfig || {},
     locales: userConfig.locales || {},
-    scrollOffset: userConfig.scrollOffset ?? 90,
+    scrollOffset: userConfig.scrollOffset ?? 134,
     cleanUrls: !!userConfig.cleanUrls,
     contentProps: userConfig.contentProps
   }
@@ -252,20 +257,25 @@ function resolveSiteDataHead(userConfig?: UserConfig): HeadConfig[] {
       typeof userConfig?.appearance === 'string'
         ? userConfig?.appearance
         : typeof userConfig?.appearance === 'object'
-        ? userConfig.appearance.initialValue ?? 'auto'
-        : 'auto'
+          ? (userConfig.appearance.initialValue ?? 'auto')
+          : 'auto'
 
     head.push([
       'script',
       { id: 'check-dark-mode' },
       fallbackPreference === 'force-dark'
         ? `document.documentElement.classList.add('dark')`
-        : `;(() => {
-            const preference = localStorage.getItem('${APPEARANCE_KEY}') || '${fallbackPreference}'
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-            if (!preference || preference === 'auto' ? prefersDark : preference === 'dark')
-              document.documentElement.classList.add('dark')
-          })()`
+        : fallbackPreference === 'force-auto'
+          ? `;(() => {
+               if (window.matchMedia('(prefers-color-scheme: dark)').matches)
+                 document.documentElement.classList.add('dark')
+             })()`
+          : `;(() => {
+               const preference = localStorage.getItem('${APPEARANCE_KEY}') || '${fallbackPreference}'
+               const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+               if (!preference || preference === 'auto' ? prefersDark : preference === 'dark')
+                 document.documentElement.classList.add('dark')
+             })()`
     ])
   }
 

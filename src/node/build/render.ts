@@ -1,13 +1,14 @@
 import { isBooleanAttr } from '@vue/shared'
-import escape from 'escape-html'
 import fs from 'fs-extra'
-import path from 'path'
-import { pathToFileURL } from 'url'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { normalizePath, transformWithEsbuild, type Rollup } from 'vite'
+import { version } from '../../../package.json'
 import type { SiteConfig } from '../config'
 import {
   EXTERNAL_URL_RE,
   createTitle,
+  escapeHtml,
   mergeHead,
   notFoundPageData,
   resolveSiteDataByRoute,
@@ -28,14 +29,19 @@ export async function renderPage(
   assets: string[],
   pageToHashMap: Record<string, string>,
   metadataScript: { html: string; inHead: boolean },
-  additionalHeadTags: HeadConfig[]
+  additionalHeadTags: HeadConfig[],
+  usedIcons: Set<string>
 ) {
   const routePath = `/${page.replace(/\.md$/, '')}`
   const siteData = resolveSiteDataByRoute(config.site, routePath)
 
   // render page
   const context = await render(routePath)
-  const { content, teleports } = (await config.postRender?.(context)) ?? context
+  const { content, teleports, vpSocialIcons } =
+    (await config.postRender?.(context)) ?? context
+
+  // add used social icons to the set
+  vpSocialIcons.forEach((icon) => usedIcons.add(icon))
 
   const pageName = sanitizeFileName(page.replace(/\//g, '_'))
   // server build doesn't need hash
@@ -51,7 +57,7 @@ export async function renderPage(
   try {
     // resolve page data so we can render head tags
     const { __pageData } = await import(
-      pathToFileURL(path.join(config.tempDir, pageServerJsFileName)).toString()
+      pathToFileURL(path.join(config.tempDir, pageServerJsFileName)).href
     )
     pageData = __pageData
   } catch (e) {
@@ -73,16 +79,16 @@ export async function renderPage(
     config.mpa || (!hasCustom404 && page === '404.md')
       ? []
       : result && appChunk
-      ? [
-          ...new Set([
-            // resolve imports for index.js + page.md.js and inject script tags
-            // for them as well so we fetch everything as early as possible
-            // without having to wait for entry chunks to parse
-            ...resolvePageImports(config, page, result, appChunk),
-            pageClientJsFileName
-          ])
-        ]
-      : []
+        ? [
+            ...new Set([
+              // resolve imports for index.js + page.md.js and inject script tags
+              // for them as well so we fetch everything as early as possible
+              // without having to wait for entry chunks to parse
+              ...resolvePageImports(config, page, result, appChunk),
+              pageClientJsFileName
+            ])
+          ]
+        : []
 
   let prefetchLinks: string[] = []
 
@@ -147,8 +153,10 @@ export async function renderPage(
     }
   }
 
+  const dir = pageData.frontmatter.dir || siteData.dir || 'ltr'
+
   const html = `<!DOCTYPE html>
-<html lang="${siteData.lang}" dir="${siteData.dir}">
+<html lang="${siteData.lang}" dir="${dir}">
   <head>
     <meta charset="utf-8">
     ${
@@ -156,13 +164,15 @@ export async function renderPage(
         ? ''
         : '<meta name="viewport" content="width=device-width,initial-scale=1">'
     }
-    <title>${title}</title>
+    <title>${escapeHtml(title)}</title>
     ${
       isDescriptionOverridden(head)
         ? ''
         : `<meta name="description" content="${description}">`
     }
+    <meta name="generator" content="VitePress v${version}">
     ${stylesheetLink}
+    <link rel="preload stylesheet" href="${siteData.base}vp-icons.css" as="style">
     ${metadataScript.inHead ? metadataScript.html : ''}
     ${
       appChunk
@@ -172,7 +182,7 @@ export async function renderPage(
     ${await renderHead(head)}
   </head>
   <body>${teleports?.body || ''}
-    <div id="app">${content}</div>
+    <div id="app">${page === '404.md' ? '' : content}</div>
     ${metadataScript.inHead ? '' : metadataScript.html}
     ${inlinedScript}
   </body>
@@ -252,7 +262,7 @@ function renderAttrs(attrs: Record<string, string>): string {
   return Object.keys(attrs)
     .map((key) => {
       if (isBooleanAttr(key)) return ` ${key}`
-      return ` ${key}="${escape(attrs[key] as string)}"`
+      return ` ${key}="${escapeHtml(attrs[key] as string)}"`
     })
     .join('')
 }

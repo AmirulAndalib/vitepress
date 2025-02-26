@@ -1,8 +1,8 @@
 import type MarkdownIt from 'markdown-it'
-import type { RenderRule } from 'markdown-it/lib/renderer'
-import type Token from 'markdown-it/lib/token'
 import container from 'markdown-it-container'
-import { nanoid } from 'nanoid'
+import type { RenderRule } from 'markdown-it/lib/renderer.mjs'
+import type Token from 'markdown-it/lib/token.mjs'
+import type { MarkdownEnv } from '../../shared'
 import {
   extractTitle,
   getAdaptiveThemeMarker,
@@ -46,7 +46,7 @@ export const containerPlugin = (
       render: (tokens: Token[], idx: number) =>
         tokens[idx].nesting === 1 ? `<div class="vp-raw">\n` : `</div>\n`
     })
-    .use(...createCodeGroup(options))
+    .use(...createCodeGroup(options, md))
 }
 
 type ContainerArgs = [typeof container, string, { render: RenderRule }]
@@ -60,7 +60,7 @@ function createContainer(
     container,
     klass,
     {
-      render(tokens, idx, _options, env) {
+      render(tokens, idx, _options, env: MarkdownEnv & { references?: any }) {
         const token = tokens[idx]
         const info = token.info.trim().slice(klass.length).trim()
         const attrs = md.renderer.renderAttrs(token)
@@ -77,16 +77,15 @@ function createContainer(
   ]
 }
 
-function createCodeGroup(options: Options): ContainerArgs {
+function createCodeGroup(options: Options, md: MarkdownIt): ContainerArgs {
   return [
     container,
     'code-group',
     {
       render(tokens, idx) {
         if (tokens[idx].nesting === 1) {
-          const name = nanoid(5)
           let tabs = ''
-          let checked = 'checked="checked"'
+          let checked = 'checked'
 
           for (
             let i = idx + 1;
@@ -108,8 +107,7 @@ function createCodeGroup(options: Options): ContainerArgs {
               )
 
               if (title) {
-                const id = nanoid(7)
-                tabs += `<input type="radio" name="group-${name}" id="tab-${id}" ${checked}><label for="tab-${id}">${title}</label>`
+                tabs += `<input type="radio" name="group-${idx}" id="tab-${i}" ${checked}><label data-title="${md.utils.escapeHtml(title)}" for="tab-${i}">${title}</label>`
 
                 if (checked && !isHtml) tokens[i].info += ' active'
                 checked = ''
@@ -117,9 +115,7 @@ function createCodeGroup(options: Options): ContainerArgs {
             }
           }
 
-          return `<div class="vp-code-group${getAdaptiveThemeMarker(
-            options
-          )}"><div class="tabs">${tabs}</div><div class="blocks">\n`
+          return `<div class="vp-code-group${getAdaptiveThemeMarker(options)}"><div class="tabs">${tabs}</div><div class="blocks">\n`
         }
         return `</div></div>\n`
       }
@@ -129,8 +125,11 @@ function createCodeGroup(options: Options): ContainerArgs {
 
 export interface ContainerOptions {
   infoLabel?: string
+  noteLabel?: string
   tipLabel?: string
   warningLabel?: string
   dangerLabel?: string
   detailsLabel?: string
+  importantLabel?: string
+  cautionLabel?: string
 }

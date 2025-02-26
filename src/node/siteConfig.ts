@@ -4,6 +4,7 @@ import type { SitemapStreamOptions } from 'sitemap'
 import type { Logger, UserConfig as ViteConfig } from 'vite'
 import type { SitemapItem } from './build/generateSitemap'
 import type { MarkdownOptions } from './markdown/markdown'
+import type { ResolvedRouteConfig } from './plugins/dynamicRoutesPlugin'
 import type {
   Awaitable,
   HeadConfig,
@@ -30,26 +31,6 @@ export interface TransformContext {
   assets: string[]
 }
 
-interface UserRouteConfig {
-  params: Record<string, string>
-  content?: string
-}
-
-export type ResolvedRouteConfig = UserRouteConfig & {
-  /**
-   * the raw route (relative to src root), e.g. foo/[bar].md
-   */
-  route: string
-  /**
-   * the actual path with params resolved (relative to src root), e.g. foo/1.md
-   */
-  path: string
-  /**
-   * absolute fs path
-   */
-  fullPath: string
-}
-
 export interface TransformPageContext {
   siteConfig: SiteConfig
 }
@@ -69,10 +50,15 @@ export interface UserConfig<ThemeConfig = any>
 
   locales?: LocaleConfig<ThemeConfig>
 
+  router?: {
+    prefetchLinks?: boolean
+  }
+
   appearance?:
     | boolean
     | 'dark'
     | 'force-dark'
+    | 'force-auto'
     | (Omit<UseDarkOptions, 'initialValue'> & { initialValue?: 'dark' })
   lastUpdated?: boolean
   contentProps?: Record<string, any>
@@ -144,11 +130,20 @@ export interface UserConfig<ThemeConfig = any>
   useWebFonts?: boolean
 
   /**
+   * This option allows you to configure the concurrency of the build.
+   * A lower number will reduce the memory usage but will increase the build time.
+   *
+   * @experimental
+   * @default 64
+   */
+  buildConcurrency?: number
+
+  /**
    * @experimental
    *
    * source -> destination
    */
-  rewrites?: Record<string, string>
+  rewrites?: Record<string, string> | ((id: string) => string)
 
   /**
    * @experimental
@@ -201,6 +196,7 @@ export interface SiteConfig<ThemeConfig = any>
     | 'vue'
     | 'vite'
     | 'shouldPreload'
+    | 'router'
     | 'mpa'
     | 'metaChunk'
     | 'lastUpdated'
@@ -225,14 +221,12 @@ export interface SiteConfig<ThemeConfig = any>
   cacheDir: string
   tempDir: string
   pages: string[]
-  dynamicRoutes: {
-    routes: ResolvedRouteConfig[]
-    fileToModulesMap: Record<string, Set<string>>
-  }
+  dynamicRoutes: ResolvedRouteConfig[]
   rewrites: {
     map: Record<string, string | undefined>
     inv: Record<string, string | undefined>
   }
   logger: Logger
   userConfig: UserConfig
+  buildConcurrency: number
 }
