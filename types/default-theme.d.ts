@@ -1,9 +1,8 @@
-import type MarkdownIt from 'markdown-it'
-import type { Options as MiniSearchOptions } from 'minisearch'
-import type { ComputedRef, Ref } from 'vue'
+import type { Options as _MiniSearchOptions } from 'minisearch'
+import type { ComputedRef, Ref, ShallowRef } from 'vue'
 import type { DocSearchProps } from './docsearch.js'
 import type { LocalSearchTranslations } from './local-search.js'
-import type { MarkdownEnv, PageData } from './shared.js'
+import type { PageData } from './shared.js'
 
 export namespace DefaultTheme {
   export interface Config {
@@ -17,7 +16,7 @@ export namespace DefaultTheme {
     /**
      * Overrides the link of the site logo.
      */
-    logoLink?: string
+    logoLink?: string | { link?: string; rel?: string; target?: string }
 
     /**
      * Custom site title in navbar. If the value is undefined,
@@ -97,6 +96,16 @@ export namespace DefaultTheme {
     darkModeSwitchLabel?: string
 
     /**
+     * @default 'Switch to light theme'
+     */
+    lightModeSwitchTitle?: string
+
+    /**
+     * @default 'Switch to dark theme'
+     */
+    darkModeSwitchTitle?: string
+
+    /**
      * @default 'Menu'
      */
     sidebarMenuLabel?: string
@@ -112,6 +121,11 @@ export namespace DefaultTheme {
      * @default 'Change language'
      */
     langMenuLabel?: string
+
+    /**
+     * @default 'Skip to content'
+     */
+    skipToContentLabel?: string
 
     search?:
       | { provider: 'local'; options?: LocalSearchOptions }
@@ -149,7 +163,12 @@ export namespace DefaultTheme {
 
   // nav -----------------------------------------------------------------------
 
-  export type NavItem = NavItemWithLink | NavItemWithChildren
+  export type NavItem = NavItemComponent | NavItemWithLink | NavItemWithChildren
+
+  export interface NavItemComponent {
+    component: string
+    props?: Record<string, any>
+  }
 
   export interface NavItemWithLink {
     text: string
@@ -161,8 +180,9 @@ export namespace DefaultTheme {
      * RegExp object here because it isn't serializable
      */
     activeMatch?: string
-    target?: string
     rel?: string
+    target?: string
+    noIcon?: boolean
   }
 
   export interface NavItemChildren {
@@ -172,7 +192,7 @@ export namespace DefaultTheme {
 
   export interface NavItemWithChildren {
     text?: string
-    items: (NavItemChildren | NavItemWithLink)[]
+    items: (NavItemComponent | NavItemChildren | NavItemWithLink)[]
 
     /**
      * `activeMatch` is expected to be a regex string. We can't use actual
@@ -314,18 +334,7 @@ export namespace DefaultTheme {
     ariaLabel?: string
   }
 
-  export type SocialLinkIcon =
-    | 'discord'
-    | 'facebook'
-    | 'github'
-    | 'instagram'
-    | 'linkedin'
-    | 'mastodon'
-    | 'slack'
-    | 'twitter'
-    | 'x'
-    | 'youtube'
-    | { svg: string }
+  export type SocialLinkIcon = string | { svg: string }
 
   // footer --------------------------------------------------------------------
 
@@ -345,6 +354,26 @@ export namespace DefaultTheme {
     desc?: string
     links?: SocialLink[]
     sponsor?: string
+    actionText?: string
+  }
+
+  // local nav -----------------------------------------------------------------
+
+  /**
+   * ReturnType of `useLocalNav`.
+   */
+  export interface DocLocalNav {
+    /**
+     * The outline headers of the current page.
+     */
+    headers: ShallowRef<any>
+
+    /**
+     * Whether the current page has a local nav. Local nav is shown when the
+     * "outline" is present in the page. However, note that the actual
+     * local nav visibility depends on the screen width as well.
+     */
+    hasLocalNav: ComputedRef<boolean>
   }
 
   // outline -------------------------------------------------------------------
@@ -380,25 +409,21 @@ export namespace DefaultTheme {
     translations?: LocalSearchTranslations
     locales?: Record<string, Partial<Omit<LocalSearchOptions, 'locales'>>>
 
-    miniSearch?: {
-      /**
-       * @see https://lucaong.github.io/minisearch/modules/_minisearch_.html#options
-       */
-      options?: Pick<
-        MiniSearchOptions,
-        'extractField' | 'tokenize' | 'processTerm'
-      >
-      /**
-       * @see https://lucaong.github.io/minisearch/modules/_minisearch_.html#searchoptions-1
-       */
-      searchOptions?: MiniSearchOptions['searchOptions']
-    }
+    miniSearch?: MiniSearchOptions
+  }
 
+  interface MiniSearchOptions {
     /**
-     * Allows transformation of content before indexing (node only)
-     * Return empty string to skip indexing
+     * @see https://lucaong.github.io/minisearch/types/MiniSearch.Options.html
      */
-    _render?: (src: string, env: MarkdownEnv, md: MarkdownIt) => string
+    options?: Pick<
+      _MiniSearchOptions,
+      'extractField' | 'tokenize' | 'processTerm'
+    >
+    /**
+     * @see https://lucaong.github.io/minisearch/types/MiniSearch.SearchOptions.html
+     */
+    searchOptions?: _MiniSearchOptions['searchOptions']
   }
 
   // algolia -------------------------------------------------------------------

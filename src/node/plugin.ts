@@ -1,9 +1,8 @@
-import path from 'path'
+import path from 'node:path'
 import c from 'picocolors'
 import {
   mergeConfig,
   searchForWorkspaceRoot,
-  type ModuleNode,
   type Plugin,
   type ResolvedConfig,
   type Rollup,
@@ -11,12 +10,13 @@ import {
 } from 'vite'
 import {
   APP_PATH,
+  DEFAULT_THEME_PATH,
   DIST_CLIENT_PATH,
   SITE_DATA_REQUEST_PATH,
   resolveAliases
 } from './alias'
 import { resolvePages, resolveUserConfig, type SiteConfig } from './config'
-import { mathjaxElements } from './markdown/math'
+import { disposeMdItInstance } from './markdown/markdown'
 import {
   clearCache,
   createMarkdownToVueRenderFn,
@@ -38,8 +38,7 @@ declare module 'vite' {
 
 const themeRE = /\/\.vitepress\/theme\/index\.(m|c)?(j|t)s$/
 const hashRE = /\.([-\w]+)\.js$/
-const staticInjectMarkerRE =
-  /\b(const _hoisted_\d+ = \/\*(?:#|@)__PURE__\*\/\s*createStaticVNode)\("(.*)", (\d+)\)/g
+const staticInjectMarkerRE = /\bcreateStaticVNode\((?:(".*")|('.*')), (\d+)\)/g
 const staticStripRE = /['"`]__VP_STATIC_START__[^]*?__VP_STATIC_END__['"`]/g
 const staticRestoreRE = /__VP_STATIC_(START|END)__/g
 
@@ -76,7 +75,6 @@ export async function createVitePressPlugin(
     site,
     vue: userVuePluginOptions,
     vite: userViteConfig,
-    pages,
     lastUpdated,
     cleanUrls
   } = siteConfig
@@ -88,7 +86,7 @@ export async function createVitePressPlugin(
 
   if (markdown?.math) {
     isCustomElement = (tag) => {
-      if (mathjaxElements.includes(tag)) {
+      if (tag.startsWith('mjx-')) {
         return true
       }
       return userCustomElementChecker?.(tag) ?? false
@@ -98,7 +96,7 @@ export async function createVitePressPlugin(
   // lazy require plugin-vue to respect NODE_ENV in @vue/compiler-x
   const vuePlugin = await import('@vitejs/plugin-vue').then((r) =>
     r.default({
-      include: [/\.vue$/, /\.md$/],
+      include: /\.(?:vue|md)$/,
       ...userVuePluginOptions,
       template: {
         ...userVuePluginOptions?.template,
@@ -132,8 +130,6 @@ export async function createVitePressPlugin(
       markdownToVue = await createMarkdownToVueRenderFn(
         srcDir,
         markdown,
-        pages,
-        config.define,
         config.command === 'build',
         config.base,
         lastUpdated,
@@ -153,11 +149,19 @@ export async function createVitePressPlugin(
             site.themeConfig?.search?.provider === 'algolia' ||
             !!site.themeConfig?.algolia, // legacy
           __CARBON__: !!site.themeConfig?.carbonAds,
-          __ASSETS_DIR__: JSON.stringify(siteConfig.assetsDir)
+          __ASSETS_DIR__: JSON.stringify(siteConfig.assetsDir),
+          __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: !!process.env.DEBUG
         },
         optimizeDeps: {
           // force include vue to avoid duplicated copies when linked + optimized
-          include: ['vue', 'vitepress > @vue/devtools-api'],
+          include: [
+            'vue',
+            'vitepress > @vue/devtools-api',
+            'vitepress > @vueuse/core',
+            siteConfig.themeDir === DEFAULT_THEME_PATH
+              ? '@theme/index'
+              : undefined
+          ].filter((d) => d != null),
           exclude: ['@docsearch/js', 'vitepress']
         },
         server: {
@@ -195,9 +199,7 @@ export async function createVitePressPlugin(
           }
         }
         data = serializeFunctions(data)
-        return `${deserializeFunctions};export default deserializeFunctions(JSON.parse(${JSON.stringify(
-          JSON.stringify(data)
-        )}))`
+        return `${deserializeFunctions};export default deserializeFunctions(JSON.parse(${JSON.stringify(JSON.stringify(data))}))`
       }
     },
 
@@ -206,7 +208,7 @@ export async function createVitePressPlugin(
         return processClientJS(code, id)
       } else if (id.endsWith('.md')) {
         // transform .md files into vueSrc so plugin-vue can handle it
-        const { vueSrc, deadLinks, includes } = await markdownToVue(
+        const { vueSrc, deadLinks, includes, pageData } = await markdownToVue(
           code,
           id,
           config.publicDir
@@ -216,6 +218,22 @@ export async function createVitePressPlugin(
           includes.forEach((i) => {
             ;(importerMap[slash(i)] ??= new Set()).add(id)
             this.addWatchFile(i)
+          })
+        }
+        if (
+          this.environment.mode === 'dev' &&
+          this.environment.name === 'client'
+        ) {
+          const relativePath = path.posix.relative(srcDir, id)
+          const payload: PageDataPayload = {
+            path: `/${siteConfig.rewrites.map[relativePath] || relativePath}`,
+            pageData
+          }
+          // notify the client to update page data
+          this.environment.hot.send({
+            type: 'custom',
+            event: 'vitepress:pageData',
+            data: payload
           })
         }
         return processClientJS(vueSrc, id)
@@ -254,9 +272,7 @@ export async function createVitePressPlugin(
         if (themeRE.test(file)) {
           siteConfig.logger.info(
             c.green(
-              `${path.relative(process.cwd(), _file)} ${
-                added ? 'created' : 'deleted'
-              }, restarting server...\n`
+              `${path.relative(process.cwd(), _file)} ${added ? 'created' : 'deleted'}, restarting server...\n`
             ),
             { clear: true, timestamp: true }
           )
@@ -268,7 +284,11 @@ export async function createVitePressPlugin(
         if (file.endsWith('.md')) {
           Object.assign(
             siteConfig,
-            await resolvePages(siteConfig.srcDir, siteConfig.userConfig)
+            await resolvePages(
+              siteConfig.srcDir,
+              siteConfig.userConfig,
+              siteConfig.logger
+            )
           )
         }
 
@@ -287,7 +307,8 @@ export async function createVitePressPlugin(
           if (url?.endsWith('.html')) {
             res.statusCode = 200
             res.setHeader('Content-Type', 'text/html')
-            let html = `<!DOCTYPE html>
+            let html = `\
+<!DOCTYPE html>
 <html>
   <head>
     <title></title>
@@ -317,10 +338,11 @@ export async function createVitePressPlugin(
         // Using a regexp relies on specific output from Vue compiler core,
         // which is a reasonable trade-off considering the massive perf win over
         // a full AST parse.
-        code = code.replace(
-          staticInjectMarkerRE,
-          '$1("__VP_STATIC_START__$2__VP_STATIC_END__", $3)'
-        )
+        code = code.replace(staticInjectMarkerRE, (_, str1, str2, flag) => {
+          const str = str1 || str2
+          const quote = str[0]
+          return `createStaticVNode(${quote}__VP_STATIC_START__${str.slice(1, -1)}__VP_STATIC_END__${quote}, ${flag})`
+        })
         return code
       }
       return null
@@ -328,14 +350,11 @@ export async function createVitePressPlugin(
 
     generateBundle(_options, bundle) {
       if (ssr) {
-        // @ts-ignore will be removed in vite 5
-        if (config.ssr?.format !== 'cjs') {
-          this.emitFile({
-            type: 'asset',
-            fileName: 'package.json',
-            source: '{ "private": true, "type": "module" }'
-          })
-        }
+        this.emitFile({
+          type: 'asset',
+          fileName: 'package.json',
+          source: '{ "private": true, "type": "module" }'
+        })
       } else {
         // client build:
         // for each .md entry chunk, adjust its name to its correct path.
@@ -350,6 +369,10 @@ export async function createVitePressPlugin(
             bundle[name + '-lean'] = {
               ...chunk,
               fileName: chunk.fileName.replace(/\.js$/, '.lean.js'),
+              preliminaryFileName: chunk.preliminaryFileName.replace(
+                /\.js$/,
+                '.lean.js'
+              ),
               code: chunk.code.replace(staticStripRE, `""`)
             }
 
@@ -360,15 +383,13 @@ export async function createVitePressPlugin(
       }
     },
 
-    async handleHotUpdate(ctx) {
-      const { file, read, server } = ctx
+    async hotUpdate({ file }) {
+      if (this.environment.name !== 'client') return
+
       if (file === configPath || configDeps.includes(file)) {
         siteConfig.logger.info(
           c.green(
-            `${path.relative(
-              process.cwd(),
-              file
-            )} changed, restarting server...\n`
+            `${path.relative(process.cwd(), file)} changed, restarting server...\n`
           ),
           { clear: true, timestamp: true }
         )
@@ -376,53 +397,32 @@ export async function createVitePressPlugin(
         try {
           await resolveUserConfig(siteConfig.root, 'serve', 'development')
         } catch (err: any) {
+          siteConfig.logger.error(err)
           return
         }
 
+        disposeMdItInstance()
         clearCache()
         await recreateServer?.()
         return
-      }
-
-      // hot reload .md files as .vue files
-      if (file.endsWith('.md')) {
-        const content = await read()
-        const { pageData, vueSrc } = await markdownToVue(
-          content,
-          file,
-          config.publicDir
-        )
-
-        const payload: PageDataPayload = {
-          path: `/${slash(path.relative(srcDir, file))}`,
-          pageData
-        }
-
-        // notify the client to update page data
-        server.ws.send({
-          type: 'custom',
-          event: 'vitepress:pageData',
-          data: payload
-        })
-
-        // overwrite src so vue plugin can handle the HMR
-        ctx.read = () => vueSrc
       }
     }
   }
 
   const hmrFix: Plugin = {
     name: 'vitepress:hmr-fix',
-    async handleHotUpdate({ file, server, modules }) {
+    async hotUpdate({ file, modules }) {
+      if (this.environment.name !== 'client') return
+
       const importers = [...(importerMap[slash(file)] || [])]
       if (importers.length > 0) {
         return [
           ...modules,
           ...importers.map((id) => {
             clearCache(id)
-            return server.moduleGraph.getModuleById(id)
+            return this.environment.moduleGraph.getModuleById(id)
           })
-        ].filter(Boolean) as ModuleNode[]
+        ].filter((mod) => mod !== undefined)
       }
     }
   }
